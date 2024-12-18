@@ -1,22 +1,27 @@
-# How to use
+# Serial Port Lister
 
-Windowsマシンで、コマンドラインからbin/serialList.exeを実行してください。
-シリアルポートの状況が表示され、USB接続のものはVIDとPIDが表示されます。
-VID:2E8A のものがRaspberryPiPicoである可能性が高いです。
+## 使い方
 
-実行例です。この例ではCOM5がRaspberryPiPicoに接続されています。
+1. Windowsマシンで、コマンドラインから`bin/serialList.exe`を実行してください。
+2. シリアルポートの状況が表示され、USB接続のデバイスについてはVIDとPIDも表示されます。
+3. VID:2E8A が表示されている場合、そのポートはRaspberry Pi Picoである可能性が高いです。
+
+### 実行例
+以下の例では、COM5がRaspberry Pi Picoに接続されています：
 
 ```
 COM1 : ready
 COM5 [VID:2E8A Raspberry Pi Foundation PID:0003] : ready
 ```
 
-# How to build 
+## ビルド方法
 
-src/serialList.go　を次のコマンドで実行してください。
-
+### 直接実行
 ```
 go run src/serialList.go
 ```
 
-go buildでexeファイルを作成することもできます。
+### 実行ファイルの作成
+```
+go build -o bin/serialList.exe src/serialList.go
+```
