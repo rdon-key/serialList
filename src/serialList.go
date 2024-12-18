@@ -4,9 +4,15 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
+)
+
+const (
+	registryUSBPath    = `SYSTEM\CurrentControlSet\Enum\USB`
+	registrySerialPath = `HARDWARE\DEVICEMAP\SERIALCOMM`
 )
 
 type DeviceInfo struct {
@@ -30,11 +36,147 @@ func init() {
 	flag.Parse()
 }
 
+func main() {
+	devices, err := findDevices()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	displayDevices(devices)
+
+	// GUIから実行されたかチェック
+	if isRunFromExplorer() {
+		fmt.Println("\nPress Enter to exit...")
+		fmt.Scanln()
+	}
+}
+
+func isRunFromExplorer() bool {
+	_, exists := os.LookupEnv("TERM")
+	return !exists
+}
+
+func findDevices() (map[string]*DeviceInfo, error) {
+	// レジストリキーを開く
+	keys, err := openRegistryKeys()
+	if err != nil {
+		return nil, err
+	}
+	defer closeRegistryKeys(keys)
+
+	// デバイス一覧を取得
+	devices := make(map[string]*DeviceInfo)
+	findAllSerialPorts(keys.commKey, devices)
+	findUSBInfo(registryUSBPath, keys.usbKey, devices)
+
+	return devices, nil
+}
+
+type registryKeys struct {
+	commKey registry.Key
+	usbKey  registry.Key
+}
+
+func openRegistryKeys() (*registryKeys, error) {
+	commKey, err := registry.OpenKey(registry.LOCAL_MACHINE,
+	registrySerialPath,
+	registry.READ)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open SERIALCOMM registry: %v", err)
+	}
+
+	usbKey, err := registry.OpenKey(registry.LOCAL_MACHINE,
+	registryUSBPath,
+	registry.READ)
+	if err != nil {
+		commKey.Close()
+		return nil, fmt.Errorf("failed to open USB registry: %v", err)
+	}
+
+	return &registryKeys{
+		commKey: commKey,
+		usbKey:  usbKey,
+	}, nil
+}
+
+func closeRegistryKeys(keys *registryKeys) {
+	if keys != nil {
+		keys.commKey.Close()
+		keys.usbKey.Close()
+	}
+}
+
+func findAllSerialPorts(key registry.Key, devices map[string]*DeviceInfo) {
+	values, err := key.ReadValueNames(-1)
+	if err != nil {
+		return
+	}
+
+	for _, name := range values {
+		portName, _, err := key.GetStringValue(name)
+		if err != nil {
+			continue
+		}
+
+		ready := checkPortReady(portName)
+		devices[portName] = &DeviceInfo{
+			PortName: portName,
+			Ready:    ready,
+			IsUSB:    false,
+		}
+	}
+}
+
+func findUSBInfo(basePath string, key registry.Key, devices map[string]*DeviceInfo) {
+	subKeys, err := key.ReadSubKeyNames(-1)
+	if err != nil {
+		return
+	}
+
+	for _, subKey := range subKeys {
+		if strings.Contains(subKey, "VID_") {
+			path := basePath + "\\" + subKey
+			deviceKey, err := registry.OpenKey(registry.LOCAL_MACHINE, path, registry.READ)
+			if err != nil {
+				continue
+			}
+			defer deviceKey.Close()
+
+			subDevices, err := deviceKey.ReadSubKeyNames(-1)
+			if err != nil {
+				continue
+			}
+
+			for _, subDevice := range subDevices {
+				subPath := path + "\\" + subDevice
+				subDeviceKey, err := registry.OpenKey(registry.LOCAL_MACHINE, subPath, registry.READ)
+				if err != nil {
+					continue
+				}
+				defer subDeviceKey.Close()
+
+				friendlyName, _, err := subDeviceKey.GetStringValue("FriendlyName")
+				if err != nil {
+					continue
+				}
+
+				if strings.Contains(friendlyName, "COM") {
+					portName := extractCOMPort(friendlyName)
+					if device, exists := devices[portName]; exists {
+						vid, pid := extractVIDPID(subKey)
+						device.VID = vid
+						device.PID = pid
+						device.IsUSB = true
+					}
+				}
+			}
+		}
+	}
+}
+
 func checkPortReady(portName string) bool {
-	// Windowsのデバイスパス形式に変換
 	portPath := windows.StringToUTF16Ptr(`\\.\` + portName)
 
-	// ポートを開く
 	handle, err := windows.CreateFile(
 		portPath,
 		windows.GENERIC_READ|windows.GENERIC_WRITE,
@@ -49,33 +191,12 @@ func checkPortReady(portName string) bool {
 		}
 		defer windows.CloseHandle(handle)
 
-		// DCBの取得を試みる（実際の通信は行わない）
 		var dcb windows.DCB
 		err = windows.GetCommState(handle, &dcb)
 		return err == nil
 	}
 
-	func main() {
-		commKey, err := registry.OpenKey(registry.LOCAL_MACHINE,
-		`HARDWARE\DEVICEMAP\SERIALCOMM`,
-		registry.READ)
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer commKey.Close()
-
-		usbKey, err := registry.OpenKey(registry.LOCAL_MACHINE,
-		`SYSTEM\CurrentControlSet\Enum\USB`,
-		registry.READ)
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer usbKey.Close()
-
-		devices := make(map[string]*DeviceInfo)
-		findAllSerialPorts(commKey, devices)
-		findUSBInfo(`SYSTEM\CurrentControlSet\Enum\USB`, usbKey, devices)
-
+	func displayDevices(devices map[string]*DeviceInfo) {
 		first := true
 		for _, device := range devices {
 			if showAll || device.Ready {
@@ -83,97 +204,36 @@ func checkPortReady(portName string) bool {
 					fmt.Println()
 				}
 				first = false
-
-				if device.IsUSB {
-					status := "ready"
-					if !device.Ready {
-						status = "busy"
-					}
-
-					vendorInfo := device.VID
-					if vendor, exists := knownVendors[device.VID]; exists {
-						vendorInfo = fmt.Sprintf("%s %s", device.VID, vendor)
-					}
-
-					fmt.Printf("%s [VID:%s PID:%s] : %s", 
-					device.PortName, vendorInfo, device.PID, status)
-				} else {
-					status := "ready"
-					if !device.Ready {
-						status = "busy"
-					}
-					fmt.Printf("%s : %s", device.PortName, status)
-				}
+				displayDevice(device)
 			}
 		}
 	}
 
-	func findAllSerialPorts(key registry.Key, devices map[string]*DeviceInfo) {
-		values, err := key.ReadValueNames(-1)
-		if err != nil {
-			return
-		}
+	func displayDevice(device *DeviceInfo) {
+		if device.IsUSB {
+			status := getDeviceStatus(device.Ready)
+			vendorInfo := getVendorInfo(device.VID)
 
-		for _, name := range values {
-			portName, _, err := key.GetStringValue(name)
-			if err != nil {
-				continue
-			}
-
-			ready := checkPortReady(portName)
-			devices[portName] = &DeviceInfo{
-				PortName: portName,
-				Ready:    ready,
-				IsUSB:    false,
-			}
+			fmt.Printf("%s [VID:%s PID:%s] : %s",
+			device.PortName, vendorInfo, device.PID, status)
+		} else {
+			status := getDeviceStatus(device.Ready)
+			fmt.Printf("%s : %s", device.PortName, status)
 		}
 	}
 
-	func findUSBInfo(basePath string, key registry.Key, devices map[string]*DeviceInfo) {
-		subKeys, err := key.ReadSubKeyNames(-1)
-		if err != nil {
-			return
+	func getDeviceStatus(ready bool) string {
+		if ready {
+			return "ready"
 		}
+		return "busy"
+	}
 
-		for _, subKey := range subKeys {
-			if strings.Contains(subKey, "VID_") {
-				path := basePath + "\\" + subKey
-				deviceKey, err := registry.OpenKey(registry.LOCAL_MACHINE, path, registry.READ)
-				if err != nil {
-					continue
-				}
-				defer deviceKey.Close()
-
-				subDevices, err := deviceKey.ReadSubKeyNames(-1)
-				if err != nil {
-					continue
-				}
-
-				for _, subDevice := range subDevices {
-					subPath := path + "\\" + subDevice
-					subDeviceKey, err := registry.OpenKey(registry.LOCAL_MACHINE, subPath, registry.READ)
-					if err != nil {
-						continue
-					}
-					defer subDeviceKey.Close()
-
-					friendlyName, _, err := subDeviceKey.GetStringValue("FriendlyName")
-					if err != nil {
-						continue
-					}
-
-					if strings.Contains(friendlyName, "COM") {
-						portName := extractCOMPort(friendlyName)
-						if device, exists := devices[portName]; exists {
-							vid, pid := extractVIDPID(subKey)
-							device.VID = vid
-							device.PID = pid
-							device.IsUSB = true
-						}
-					}
-				}
-			}
+	func getVendorInfo(vid string) string {
+		if vendor, exists := knownVendors[vid]; exists {
+			return fmt.Sprintf("%s %s", vid, vendor)
 		}
+		return vid
 	}
 
 	func extractCOMPort(friendlyName string) string {
