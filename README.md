@@ -1,5 +1,17 @@
 # Serial Port Lister
 
+windowsマシンに接続されているCOMポートの情報を一覧表示します。
+
+## 環境
+
+次の環境で開発されました。
+
+エディション	Windows 11 Pro
+バージョン	23H2
+OS ビルド	22631.4602
+
+go version go1.23.2 windows/amd64
+
 ## 使い方
 
 1. Windowsマシンで、コマンドラインから`bin/serialList.exe`を実行してください。
