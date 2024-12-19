@@ -3,11 +3,10 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
-	"os"
-	"strings"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
+	"log"
+	"strings"
 )
 
 const (
@@ -28,11 +27,19 @@ var knownVendors = map[string]string{
 }
 
 var (
-	showAll bool
+	noPause bool
 )
 
 func init() {
-	flag.BoolVar(&showAll, "a", false, "Show all ports including not ready")
+	flag.BoolVar(&noPause, "n", false, "Exit without waiting for key press.")
+
+	flag.Usage = func() {
+		fmt.Println("Display the status of COM ports.")
+		fmt.Println("Usage of program:")
+		fmt.Println("-n    Exit without waiting for key press.")
+		flag.PrintDefaults()
+	}
+
 	flag.Parse()
 }
 
@@ -43,17 +50,10 @@ func main() {
 	}
 
 	displayDevices(devices)
-
-	// GUIから実行されたかチェック
-	if isRunFromExplorer() {
+	if !noPause {
 		fmt.Println("\nPress Enter to exit...")
 		fmt.Scanln()
 	}
-}
-
-func isRunFromExplorer() bool {
-	_, exists := os.LookupEnv("TERM")
-	return !exists
 }
 
 func findDevices() (map[string]*DeviceInfo, error) {
@@ -68,7 +68,6 @@ func findDevices() (map[string]*DeviceInfo, error) {
 	devices := make(map[string]*DeviceInfo)
 	findAllSerialPorts(keys.commKey, devices)
 	findUSBInfo(registryUSBPath, keys.usbKey, devices)
-
 	return devices, nil
 }
 
@@ -79,15 +78,15 @@ type registryKeys struct {
 
 func openRegistryKeys() (*registryKeys, error) {
 	commKey, err := registry.OpenKey(registry.LOCAL_MACHINE,
-	registrySerialPath,
-	registry.READ)
+		registrySerialPath,
+		registry.READ)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open SERIALCOMM registry: %v", err)
 	}
 
 	usbKey, err := registry.OpenKey(registry.LOCAL_MACHINE,
-	registryUSBPath,
-	registry.READ)
+		registryUSBPath,
+		registry.READ)
 	if err != nil {
 		commKey.Close()
 		return nil, fmt.Errorf("failed to open USB registry: %v", err)
@@ -117,7 +116,6 @@ func findAllSerialPorts(key registry.Key, devices map[string]*DeviceInfo) {
 		if err != nil {
 			continue
 		}
-
 		ready := checkPortReady(portName)
 		devices[portName] = &DeviceInfo{
 			PortName: portName,
@@ -146,7 +144,6 @@ func findUSBInfo(basePath string, key registry.Key, devices map[string]*DeviceIn
 			if err != nil {
 				continue
 			}
-
 			for _, subDevice := range subDevices {
 				subPath := path + "\\" + subDevice
 				subDeviceKey, err := registry.OpenKey(registry.LOCAL_MACHINE, subPath, registry.READ)
@@ -186,82 +183,79 @@ func checkPortReady(portName string) bool {
 		windows.FILE_ATTRIBUTE_NORMAL,
 		0)
 
-		if err != nil {
-			return false
-		}
-		defer windows.CloseHandle(handle)
-
-		var dcb windows.DCB
-		err = windows.GetCommState(handle, &dcb)
-		return err == nil
+	if err != nil {
+		return false
 	}
+	defer windows.CloseHandle(handle)
 
-	func displayDevices(devices map[string]*DeviceInfo) {
-		first := true
-		for _, device := range devices {
-			if showAll || device.Ready {
-				if !first {
-					fmt.Println()
-				}
-				first = false
-				displayDevice(device)
-			}
+	var dcb windows.DCB
+	err = windows.GetCommState(handle, &dcb)
+	return err == nil
+}
+
+func displayDevices(devices map[string]*DeviceInfo) {
+	first := true
+	for _, device := range devices {
+		if !first {
+			fmt.Println()
 		}
+		first = false
+		displayDevice(device)
 	}
+}
 
-	func displayDevice(device *DeviceInfo) {
-		if device.IsUSB {
-			status := getDeviceStatus(device.Ready)
-			vendorInfo := getVendorInfo(device.VID)
-
-			fmt.Printf("%s [VID:%s PID:%s] : %s",
+func displayDevice(device *DeviceInfo) {
+	if device.IsUSB {
+		status := getDeviceStatus(device.Ready)
+		vendorInfo := getVendorInfo(device.VID)
+		fmt.Printf("%s [VID:%s PID:%s] : %s",
 			device.PortName, vendorInfo, device.PID, status)
-		} else {
-			status := getDeviceStatus(device.Ready)
-			fmt.Printf("%s : %s", device.PortName, status)
-		}
+	} else {
+		status := getDeviceStatus(device.Ready)
+		fmt.Printf("%s : %s", device.PortName, status)
+	}
+}
+
+func getDeviceStatus(ready bool) string {
+	if ready {
+		return "ready"
+	}
+	return "busy"
+}
+
+func getVendorInfo(vid string) string {
+	if vendor, exists := knownVendors[vid]; exists {
+		return fmt.Sprintf("%s %s", vid, vendor)
+	}
+	return vid
+}
+
+func extractCOMPort(friendlyName string) string {
+	start := strings.Index(friendlyName, "(COM")
+	if start == -1 {
+		return ""
+	}
+	end := strings.Index(friendlyName[start:], ")")
+	if end == -1 {
+		return ""
+	}
+	return friendlyName[start+1 : start+end]
+}
+
+func extractVIDPID(devicePath string) (string, string) {
+	devicePath = strings.ToUpper(devicePath)
+	vid := ""
+	pid := ""
+
+	vidIndex := strings.Index(devicePath, "VID_")
+	if vidIndex != -1 && len(devicePath) >= vidIndex+8 {
+		vid = devicePath[vidIndex+4 : vidIndex+8]
 	}
 
-	func getDeviceStatus(ready bool) string {
-		if ready {
-			return "ready"
-		}
-		return "busy"
+	pidIndex := strings.Index(devicePath, "PID_")
+	if pidIndex != -1 && len(devicePath) >= pidIndex+8 {
+		pid = devicePath[pidIndex+4 : pidIndex+8]
 	}
 
-	func getVendorInfo(vid string) string {
-		if vendor, exists := knownVendors[vid]; exists {
-			return fmt.Sprintf("%s %s", vid, vendor)
-		}
-		return vid
-	}
-
-	func extractCOMPort(friendlyName string) string {
-		start := strings.Index(friendlyName, "(COM")
-		if start == -1 {
-			return ""
-		}
-		end := strings.Index(friendlyName[start:], ")")
-		if end == -1 {
-			return ""
-		}
-		return friendlyName[start+1 : start+end]
-	}
-
-	func extractVIDPID(devicePath string) (string, string) {
-		devicePath = strings.ToUpper(devicePath)
-		vid := ""
-		pid := ""
-
-		vidIndex := strings.Index(devicePath, "VID_")
-		if vidIndex != -1 && len(devicePath) >= vidIndex+8 {
-			vid = devicePath[vidIndex+4 : vidIndex+8]
-		}
-
-		pidIndex := strings.Index(devicePath, "PID_")
-		if pidIndex != -1 && len(devicePath) >= pidIndex+8 {
-			pid = devicePath[pidIndex+4 : pidIndex+8]
-		}
-
-		return vid, pid
-	}
+	return vid, pid
+}
